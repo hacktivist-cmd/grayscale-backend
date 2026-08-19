@@ -1,18 +1,36 @@
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import bcrypt from 'bcryptjs';
+import fs from 'fs';
+import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Use /data/grayscale.db on Render, else local
-const DB_PATH = process.env.NODE_ENV === 'production' 
-  ? '/data/grayscale.db' 
-  : join(__dirname, 'grayscale.db');
+// Determine DB path
+let DB_PATH;
+if (process.env.NODE_ENV === 'production') {
+  const dataDir = '/data';
+  // Create /data if it doesn't exist
+  try {
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    // Test write permissions
+    fs.accessSync(dataDir, fs.constants.W_OK);
+    DB_PATH = join(dataDir, 'grayscale.db');
+    console.log(`Using production database at: ${DB_PATH}`);
+  } catch (err) {
+    console.warn(`Cannot use /data: ${err.message}. Falling back to local file.`);
+    DB_PATH = join(__dirname, 'grayscale.db');
+  }
+} else {
+  DB_PATH = join(__dirname, 'grayscale.db');
+}
 
-console.log(`Using database at: ${DB_PATH}`);
+console.log(`Final database path: ${DB_PATH}`);
 
 export async function initDB() {
   try {
