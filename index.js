@@ -3,12 +3,16 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { initDB, ensureTables } from './database.js';
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_grayscale_key_2026';
+
+// Generate a random JWT secret if not provided in env
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+console.log(`JWT_SECRET: ${JWT_SECRET.substring(0, 8)}... (${JWT_SECRET.length} chars)`);
 
 app.use(cors());
 app.use(express.json());
@@ -110,6 +114,7 @@ app.get('/api/auth/me', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'User not found' });
     res.json({ user });
   } catch (error) {
+    console.error('Auth/me error:', error);
     res.status(401).json({ error: 'Invalid token' });
   }
 });
@@ -133,6 +138,7 @@ app.post('/api/auth/change-password', async (req, res) => {
     await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [newHash, decoded.id]);
     res.json({ success: true, message: 'Password changed successfully' });
   } catch (error) {
+    console.error('Change password error:', error);
     res.status(500).json({ error: 'Failed to change password' });
   }
 });
@@ -159,6 +165,7 @@ app.delete('/api/auth/delete-account', async (req, res) => {
     await db.run("DELETE FROM users WHERE id = ?", [decoded.id]);
     res.json({ success: true, message: 'Account deleted successfully' });
   } catch (error) {
+    console.error('Delete account error:', error);
     res.status(500).json({ error: 'Failed to delete account' });
   }
 });
@@ -174,6 +181,7 @@ app.get('/api/assets', async (req, res) => {
     const user = await db.get("SELECT balance_usd FROM users WHERE id = ?", [decoded.id]);
     res.json({ assets, cashBalance: user?.balance_usd || 0 });
   } catch (error) {
+    console.error('Assets error:', error);
     res.status(401).json({ error: 'Invalid token' });
   }
 });
@@ -187,6 +195,7 @@ app.get('/api/transactions', async (req, res) => {
     const transactions = await db.all("SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC LIMIT 10", [decoded.id]);
     res.json({ transactions });
   } catch (error) {
+    console.error('Transactions error:', error);
     res.status(401).json({ error: 'Invalid token' });
   }
 });
@@ -241,7 +250,7 @@ app.post('/api/investments/start', async (req, res) => {
 
     res.json({ success: true, investmentId: result.lastID, message: `Investment in ${asset} started. +30% profit in 7 days!` });
   } catch (error) {
-    console.error(error);
+    console.error('Investment start error:', error);
     res.status(500).json({ error: 'Failed to start investment: ' + error.message });
   }
 });
@@ -277,7 +286,7 @@ app.post('/api/investments/withdraw', async (req, res) => {
 
     res.json({ success: true, message: `Withdrawn $${totalPayout.toFixed(2)}! (Initial: $${investment.amount_invested} + Profit: $${investment.profit_amount})` });
   } catch (error) {
-    console.error(error);
+    console.error('Investment withdraw error:', error);
     res.status(500).json({ error: 'Failed to withdraw investment' });
   }
 });
@@ -291,9 +300,15 @@ app.get('/api/admin/users', async (req, res) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
     const users = await db.all("SELECT id, first_name, last_name, email, balance_usd, kyc_status, status, phone, country, accredited_investor, investment_size FROM users");
-    res.json({ users });
+    // Fetch assets for each user
+    const usersWithAssets = await Promise.all(users.map(async (u) => {
+      const assets = await db.all("SELECT symbol, holdings FROM assets WHERE user_id = ?", [u.id]);
+      return { ...u, assets };
+    }));
+    res.json({ users: usersWithAssets });
   } catch (error) {
-    res.status(401).json({ error: 'Invalid token' });
+    console.error('❌ Error in /api/admin/users:', error);
+    res.status(500).json({ error: 'Internal server error: ' + error.message });
   }
 });
 
@@ -306,10 +321,36 @@ app.put('/api/admin/users/:userId/balance', async (req, res) => {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
+    console.log(`Updating wallet balance for user ${userId} to ${balance}`);
     await db.run("UPDATE users SET balance_usd = ? WHERE id = ?", [balance, userId]);
-    res.json({ success: true, message: 'Balance updated' });
+    res.json({ success: true, message: 'Wallet balance updated' });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to update balance' });
+    console.error('❌ Error updating balance:', error);
+    res.status(500).json({ error: 'Failed to update wallet balance: ' + error.message });
+  }
+});
+
+// NEW: Admin endpoint to update user's asset holdings
+app.put('/api/admin/users/:userId/assets', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+  const token = authHeader.split(' ')[1];
+  const { userId } = req.params;
+  const { assets } = req.body; // array of { symbol, holdings }
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
+    
+    for (const asset of assets) {
+      await db.run(
+        "UPDATE assets SET holdings = ? WHERE user_id = ? AND symbol = ?",
+        [asset.holdings, userId, asset.symbol]
+      );
+    }
+    res.json({ success: true, message: 'Portfolio assets updated' });
+  } catch (error) {
+    console.error('❌ Error updating assets:', error);
+    res.status(500).json({ error: 'Failed to update portfolio assets' });
   }
 });
 
@@ -322,9 +363,11 @@ app.put('/api/admin/users/:userId/status', async (req, res) => {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
+    console.log(`Updating status for user ${userId} to ${status}`);
     await db.run("UPDATE users SET status = ? WHERE id = ?", [status, userId]);
     res.json({ success: true, message: `User status updated to ${status}` });
   } catch (error) {
+    console.error('❌ Error updating status:', error);
     res.status(500).json({ error: 'Failed to update status' });
   }
 });
@@ -345,6 +388,7 @@ app.delete('/api/admin/users/:userId', async (req, res) => {
     await db.run("DELETE FROM users WHERE id = ?", [userId]);
     res.json({ success: true, message: 'User deleted' });
   } catch (error) {
+    console.error('❌ Error deleting user:', error);
     res.status(500).json({ error: 'Failed to delete user' });
   }
 });
@@ -360,6 +404,7 @@ app.get('/api/admin/withdrawals', async (req, res) => {
     console.log(`Admin fetched ${withdrawals.length} withdrawals`);
     res.json({ withdrawals });
   } catch (error) {
+    console.error('❌ Error fetching withdrawals:', error);
     res.status(401).json({ error: 'Invalid token' });
   }
 });
@@ -385,6 +430,7 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
     await db.run("UPDATE withdrawals SET status = ? WHERE id = ?", [status, id]);
     res.json({ success: true, message: `Withdrawal ${id} ${status}` });
   } catch (error) {
+    console.error('❌ Error updating withdrawal:', error);
     res.status(500).json({ error: 'Failed to update withdrawal' });
   }
 });
@@ -400,6 +446,7 @@ app.get('/api/admin/deposits', async (req, res) => {
     console.log(`Admin fetched ${deposits.length} deposits`);
     res.json({ deposits });
   } catch (error) {
+    console.error('❌ Error fetching deposits:', error);
     res.status(401).json({ error: 'Invalid token' });
   }
 });
@@ -435,7 +482,7 @@ app.put('/api/admin/deposits/:id', async (req, res) => {
     await db.run("UPDATE deposits SET status = ? WHERE id = ?", [status, id]);
     res.json({ success: true, message: `Deposit ${id} ${status}` });
   } catch (error) {
-    console.error('Deposit approval error:', error);
+    console.error('❌ Error updating deposit:', error);
     res.status(500).json({ error: 'Failed to update deposit' });
   }
 });
@@ -450,6 +497,7 @@ app.get('/api/admin/transactions', async (req, res) => {
     const transactions = await db.all("SELECT * FROM transactions ORDER BY date DESC");
     res.json({ transactions });
   } catch (error) {
+    console.error('❌ Error fetching transactions:', error);
     res.status(401).json({ error: 'Invalid token' });
   }
 });
@@ -465,6 +513,7 @@ app.get('/api/admin/investments', async (req, res) => {
     const investments = await db.all("SELECT * FROM investments ORDER BY id DESC");
     res.json({ investments });
   } catch (error) {
+    console.error('❌ Error fetching admin investments:', error);
     res.status(401).json({ error: 'Invalid token' });
   }
 });
