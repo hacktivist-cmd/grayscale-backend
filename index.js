@@ -316,6 +316,42 @@ app.post('/api/investments/withdraw', async (req, res) => {
   }
 });
 
+// --- OTC SWAP PERSISTENCE ---
+app.post('/api/trade', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const { payAsset, getAsset, payAmount, receiveQty } = req.body;
+    if (!payAsset || !getAsset || !payAmount || !receiveQty) {
+      return res.status(400).json({ error: 'Invalid trade parameters' });
+    }
+
+    // Update asset holdings in the database
+    await db.run(
+      "UPDATE assets SET holdings = holdings - ? WHERE user_id = ? AND symbol = ?",
+      [payAmount, decoded.id, payAsset]
+    );
+    await db.run(
+      "UPDATE assets SET holdings = holdings + ? WHERE user_id = ? AND symbol = ?",
+      [receiveQty, decoded.id, getAsset]
+    );
+
+    // Record transaction
+    await db.run(
+      `INSERT INTO transactions (user_id, type, asset, amount, usd_value, date, status) 
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [decoded.id, 'OTC Swap', `${payAsset}->${getAsset}`, `-${payAmount} ${payAsset} / +${receiveQty} ${getAsset}`, '0', new Date().toLocaleDateString(), 'Completed']
+    );
+
+    res.json({ success: true, message: 'Trade executed and saved.' });
+  } catch (error) {
+    console.error('OTC trade error:', error);
+    res.status(500).json({ error: 'Failed to execute trade: ' + error.message });
+  }
+});
+
 // --- ADMIN ROUTES (All use verifyAdminToken middleware) ---
 app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
   try {

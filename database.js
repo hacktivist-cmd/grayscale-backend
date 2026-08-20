@@ -13,10 +13,10 @@ const __dirname = dirname(__filename);
 let DB_PATH;
 if (process.env.NODE_ENV === 'production') {
   const dataDir = '/data';
-  // Create /data if it doesn't exist
   try {
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
+      console.log(`Created directory: ${dataDir}`);
     }
     // Test write permissions
     fs.accessSync(dataDir, fs.constants.W_OK);
