@@ -27,7 +27,7 @@ initDB().then(async (database) => {
   await ensureTables(db);
   
   console.log('Checking for admin user...');
-  const admin = await db.get("SELECT id, email, password_hash FROM users WHERE email = ?", ['gs@ingray.com']);
+  const admin = await db.get("SELECT id, email, password_hash, role FROM users WHERE email = ?", ['gs@ingray.com']);
   if (!admin) {
     console.log('Admin not found. Creating...');
     const hash = await bcrypt.hash('gtrade', 10);
@@ -35,7 +35,7 @@ initDB().then(async (database) => {
       ['System', 'Admin', 'gs@ingray.com', hash, 'admin', 500000.00, 'Verified', 'Active']);
     console.log('✅ Admin user created: gs@ingray.com / gtrade');
   } else {
-    console.log('✅ Admin user already exists.');
+    console.log('✅ Admin user already exists with role:', admin.role);
   }
   
   app.listen(PORT, () => {
@@ -44,6 +44,31 @@ initDB().then(async (database) => {
 }).catch(err => {
   console.error('Failed to initialize DB:', err);
   process.exit(1);
+});
+
+// --- Middleware to verify JWT and log role ---
+function verifyAdminToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'No token provided' });
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    console.log(`Token decoded: userId=${decoded.id}, role=${decoded.role}`);
+    if (decoded.role !== 'admin') {
+      console.warn(`Access denied for user ${decoded.id} with role ${decoded.role}`);
+      return res.status(403).json({ error: 'Access denied. Admin role required.' });
+    }
+    req.user = decoded;
+    next();
+  } catch (error) {
+    console.error('Token verification error:', error);
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+// --- Debug endpoint to check admin token ---
+app.get('/api/admin/check', verifyAdminToken, (req, res) => {
+  res.json({ success: true, user: req.user, message: 'You are an admin!' });
 });
 
 // --- AUTH ROUTES ---
@@ -291,14 +316,9 @@ app.post('/api/investments/withdraw', async (req, res) => {
   }
 });
 
-// --- ADMIN ROUTES ---
-app.get('/api/admin/users', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+// --- ADMIN ROUTES (All use verifyAdminToken middleware) ---
+app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
     const users = await db.all("SELECT id, first_name, last_name, email, balance_usd, kyc_status, status, phone, country, accredited_investor, investment_size FROM users");
     // Fetch assets for each user
     const usersWithAssets = await Promise.all(users.map(async (u) => {
@@ -312,15 +332,10 @@ app.get('/api/admin/users', async (req, res) => {
   }
 });
 
-app.put('/api/admin/users/:userId/balance', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.put('/api/admin/users/:userId/balance', verifyAdminToken, async (req, res) => {
   const { userId } = req.params;
   const { balance } = req.body;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
     console.log(`Updating wallet balance for user ${userId} to ${balance}`);
     await db.run("UPDATE users SET balance_usd = ? WHERE id = ?", [balance, userId]);
     res.json({ success: true, message: 'Wallet balance updated' });
@@ -330,17 +345,10 @@ app.put('/api/admin/users/:userId/balance', async (req, res) => {
   }
 });
 
-// NEW: Admin endpoint to update user's asset holdings
-app.put('/api/admin/users/:userId/assets', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.put('/api/admin/users/:userId/assets', verifyAdminToken, async (req, res) => {
   const { userId } = req.params;
   const { assets } = req.body; // array of { symbol, holdings }
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
-    
     for (const asset of assets) {
       await db.run(
         "UPDATE assets SET holdings = ? WHERE user_id = ? AND symbol = ?",
@@ -354,15 +362,10 @@ app.put('/api/admin/users/:userId/assets', async (req, res) => {
   }
 });
 
-app.put('/api/admin/users/:userId/status', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.put('/api/admin/users/:userId/status', verifyAdminToken, async (req, res) => {
   const { userId } = req.params;
   const { status } = req.body;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
     console.log(`Updating status for user ${userId} to ${status}`);
     await db.run("UPDATE users SET status = ? WHERE id = ?", [status, userId]);
     res.json({ success: true, message: `User status updated to ${status}` });
@@ -372,14 +375,9 @@ app.put('/api/admin/users/:userId/status', async (req, res) => {
   }
 });
 
-app.delete('/api/admin/users/:userId', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.delete('/api/admin/users/:userId', verifyAdminToken, async (req, res) => {
   const { userId } = req.params;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
     await db.run("DELETE FROM assets WHERE user_id = ?", [userId]);
     await db.run("DELETE FROM transactions WHERE user_id = ?", [userId]);
     await db.run("DELETE FROM investments WHERE user_id = ?", [userId]);
@@ -393,33 +391,21 @@ app.delete('/api/admin/users/:userId', async (req, res) => {
   }
 });
 
-app.get('/api/admin/withdrawals', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.get('/api/admin/withdrawals', verifyAdminToken, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
     const withdrawals = await db.all("SELECT * FROM withdrawals ORDER BY date DESC");
     console.log(`Admin fetched ${withdrawals.length} withdrawals`);
     res.json({ withdrawals });
   } catch (error) {
     console.error('❌ Error fetching withdrawals:', error);
-    res.status(401).json({ error: 'Invalid token' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.put('/api/admin/withdrawals/:id', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.put('/api/admin/withdrawals/:id', verifyAdminToken, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
-    // If approved, do nothing (amount already deducted on request)
-    // If rejected, refund the amount back to user
     if (status === 'Rejected') {
       const withdrawal = await db.get("SELECT user_id, amount FROM withdrawals WHERE id = ?", [id]);
       if (withdrawal) {
@@ -435,50 +421,33 @@ app.put('/api/admin/withdrawals/:id', async (req, res) => {
   }
 });
 
-app.get('/api/admin/deposits', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.get('/api/admin/deposits', verifyAdminToken, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
     const deposits = await db.all("SELECT * FROM deposits ORDER BY date DESC");
     console.log(`Admin fetched ${deposits.length} deposits`);
     res.json({ deposits });
   } catch (error) {
     console.error('❌ Error fetching deposits:', error);
-    res.status(401).json({ error: 'Invalid token' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-app.put('/api/admin/deposits/:id', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.put('/api/admin/deposits/:id', verifyAdminToken, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
-    
-    // Fetch deposit details
     const deposit = await db.get("SELECT user_id, amount, asset FROM deposits WHERE id = ?", [id]);
     if (!deposit) return res.status(404).json({ error: 'Deposit not found' });
 
     if (status === 'Approved') {
-      // Convert USD amount to crypto based on current price
-      const price = DEFAULT_PRICES[deposit.asset] || 1; // fallback to 1 for USDT
+      const price = DEFAULT_PRICES[deposit.asset] || 1;
       const cryptoAmount = parseFloat(deposit.amount) / price;
-      
-      // Update user's asset holdings (add to the specific coin)
       await db.run(
         "UPDATE assets SET holdings = holdings + ? WHERE user_id = ? AND symbol = ?",
         [cryptoAmount, deposit.user_id, deposit.asset]
       );
       console.log(`✅ Deposit approved: ${deposit.amount} USD -> ${cryptoAmount} ${deposit.asset} for user ${deposit.user_id}`);
     }
-    // If rejected, no action needed
-
     await db.run("UPDATE deposits SET status = ? WHERE id = ?", [status, id]);
     res.json({ success: true, message: `Deposit ${id} ${status}` });
   } catch (error) {
@@ -487,38 +456,27 @@ app.put('/api/admin/deposits/:id', async (req, res) => {
   }
 });
 
-app.get('/api/admin/transactions', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.get('/api/admin/transactions', verifyAdminToken, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
     const transactions = await db.all("SELECT * FROM transactions ORDER BY date DESC");
     res.json({ transactions });
   } catch (error) {
     console.error('❌ Error fetching transactions:', error);
-    res.status(401).json({ error: 'Invalid token' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// --- NEW: Admin investments route ---
-app.get('/api/admin/investments', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  const token = authHeader.split(' ')[1];
+app.get('/api/admin/investments', verifyAdminToken, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Access denied' });
     const investments = await db.all("SELECT * FROM investments ORDER BY id DESC");
     res.json({ investments });
   } catch (error) {
     console.error('❌ Error fetching admin investments:', error);
-    res.status(401).json({ error: 'Invalid token' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// --- NEW: User deposit request endpoint ---
+// --- DEPOSIT & WITHDRAWAL USER ENDPOINTS ---
 app.post('/api/deposits', async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
@@ -546,7 +504,6 @@ app.post('/api/deposits', async (req, res) => {
   }
 });
 
-// --- NEW: User withdrawal request endpoint (immediately deducts from cash balance) ---
 app.post('/api/withdrawals', async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
@@ -559,10 +516,7 @@ app.post('/api/withdrawals', async (req, res) => {
     if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
     if (amount > user.balance_usd) return res.status(400).json({ error: 'Insufficient balance' });
     
-    // Deduct immediately from cash balance
     await db.run("UPDATE users SET balance_usd = balance_usd - ? WHERE id = ?", [amount, decoded.id]);
-    
-    // Create withdrawal request
     const id = 'WTH-' + Date.now();
     const now = new Date();
     const date = now.toLocaleDateString();
@@ -581,3 +535,10 @@ app.post('/api/withdrawals', async (req, res) => {
 });
 
 app.get('/api/health', (req, res) => res.json({ status: 'Backend running with SQLite 🚀' }));
+
+// --- Catch-all for undefined routes ---
+app.use((req, res) => {
+  res.status(404).json({ error: 'Route not found' });
+});
+
+export default app;
