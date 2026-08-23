@@ -9,7 +9,6 @@ import { dirname, join } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Determine DB path
 let DB_PATH;
 if (process.env.NODE_ENV === 'production') {
   const dataDir = '/data';
@@ -18,7 +17,6 @@ if (process.env.NODE_ENV === 'production') {
       fs.mkdirSync(dataDir, { recursive: true });
       console.log(`Created directory: ${dataDir}`);
     }
-    // Test write permissions
     fs.accessSync(dataDir, fs.constants.W_OK);
     DB_PATH = join(dataDir, 'grayscale.db');
     console.log(`Using production database at: ${DB_PATH}`);
@@ -53,7 +51,8 @@ export async function initDB() {
         phone TEXT,
         country TEXT,
         accredited_investor TEXT,
-        investment_size TEXT
+        investment_size TEXT,
+        avatar TEXT
       );
 
       CREATE TABLE IF NOT EXISTS assets (
@@ -114,6 +113,13 @@ export async function initDB() {
         FOREIGN KEY(user_id) REFERENCES users(id)
       );
     `);
+
+    // Ensure avatar column exists
+    try {
+      await db.exec("ALTER TABLE users ADD COLUMN avatar TEXT");
+    } catch (e) {
+      // Column already exists
+    }
 
     // Seed admin
     const adminExists = await db.get("SELECT * FROM users WHERE email = 'gs@ingray.com'");
