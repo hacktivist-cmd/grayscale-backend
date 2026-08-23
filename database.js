@@ -93,6 +93,19 @@ export async function initDB() {
     } catch (err) {
       console.error('Error creating table:', err.message);
       console.error('Statement:', stmt.substring(0, 100));
+      // If libsql:// fails, try https://
+      if (err.message.includes('401') && process.env.TURSO_DATABASE_URL?.startsWith('libsql://')) {
+        console.log('Trying https:// fallback...');
+        const httpsUrl = process.env.TURSO_DATABASE_URL.replace('libsql://', 'https://');
+        db = createClient({ url: httpsUrl, authToken: process.env.TURSO_AUTH_TOKEN?.trim() });
+        // Retry this statement
+        try {
+          await db.execute(stmt);
+        } catch (e2) {
+          console.error('HTTPS fallback also failed:', e2.message);
+        }
+        break; // exit loop after switching client
+      }
     }
   }
 
@@ -111,9 +124,6 @@ export async function initDB() {
       "INSERT INTO users (first_name, last_name, email, password_hash, role, balance_usd, kyc_status, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       ['System', 'Admin', 'gs@ingray.com', hash, 'admin', 500000.00, 'Verified', 'Active']
     );
-    console.log('✅ Admin user created');
-  } else {
-    console.log('✅ Admin user already exists');
   }
 
   return client;
