@@ -5,9 +5,13 @@ let db;
 
 export function getDb() {
   if (!db) {
+    const url = process.env.TURSO_DATABASE_URL?.trim();
+    const authToken = process.env.TURSO_AUTH_TOKEN?.trim();
+    console.log('Turso URL:', url);
+    console.log('Auth Token length:', authToken?.length);
     db = createClient({
-      url: process.env.TURSO_DATABASE_URL,
-      authToken: process.env.TURSO_AUTH_TOKEN,
+      url,
+      authToken,
     });
     console.log('✅ Connected to Turso database');
   }
@@ -16,9 +20,9 @@ export function getDb() {
 
 export async function initDB() {
   const client = getDb();
-  // Create tables if they don't exist
-  await client.executeMultiple(`
-    CREATE TABLE IF NOT EXISTS users (
+  // Create tables using batch
+  await client.batch([
+    `CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       first_name TEXT,
       last_name TEXT,
@@ -33,15 +37,15 @@ export async function initDB() {
       accredited_investor TEXT,
       investment_size TEXT,
       avatar TEXT
-    );
-    CREATE TABLE IF NOT EXISTS assets (
+    )`,
+    `CREATE TABLE IF NOT EXISTS assets (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       symbol TEXT,
       holdings REAL,
       FOREIGN KEY(user_id) REFERENCES users(id)
-    );
-    CREATE TABLE IF NOT EXISTS transactions (
+    )`,
+    `CREATE TABLE IF NOT EXISTS transactions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       type TEXT,
@@ -51,8 +55,8 @@ export async function initDB() {
       date TEXT,
       status TEXT DEFAULT 'Completed',
       FOREIGN KEY(user_id) REFERENCES users(id)
-    );
-    CREATE TABLE IF NOT EXISTS withdrawals (
+    )`,
+    `CREATE TABLE IF NOT EXISTS withdrawals (
       id TEXT PRIMARY KEY,
       user_id INTEGER,
       user_name TEXT,
@@ -63,8 +67,8 @@ export async function initDB() {
       status TEXT DEFAULT 'Pending',
       address TEXT,
       FOREIGN KEY(user_id) REFERENCES users(id)
-    );
-    CREATE TABLE IF NOT EXISTS deposits (
+    )`,
+    `CREATE TABLE IF NOT EXISTS deposits (
       id TEXT PRIMARY KEY,
       user_id INTEGER,
       user_name TEXT,
@@ -74,8 +78,8 @@ export async function initDB() {
       time TEXT,
       status TEXT DEFAULT 'Pending',
       FOREIGN KEY(user_id) REFERENCES users(id)
-    );
-    CREATE TABLE IF NOT EXISTS investments (
+    )`,
+    `CREATE TABLE IF NOT EXISTS investments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       asset TEXT,
@@ -86,8 +90,8 @@ export async function initDB() {
       end_date TEXT,
       status TEXT DEFAULT 'active',
       FOREIGN KEY(user_id) REFERENCES users(id)
-    );
-  `);
+    )`
+  ]);
   // Ensure avatar column exists
   try {
     await client.execute("ALTER TABLE users ADD COLUMN avatar TEXT");
@@ -107,8 +111,8 @@ export async function initDB() {
 }
 
 export async function ensureTables(db) {
-  await db.executeMultiple(`
-    CREATE TABLE IF NOT EXISTS investments (
+  await db.batch([
+    `CREATE TABLE IF NOT EXISTS investments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
       asset TEXT,
@@ -119,6 +123,6 @@ export async function ensureTables(db) {
       end_date TEXT,
       status TEXT DEFAULT 'active',
       FOREIGN KEY(user_id) REFERENCES users(id)
-    );
-  `);
+    )`
+  ]);
 }
