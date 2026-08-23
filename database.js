@@ -7,12 +7,7 @@ export function getDb() {
   if (!db) {
     const url = process.env.TURSO_DATABASE_URL?.trim();
     const authToken = process.env.TURSO_AUTH_TOKEN?.trim();
-    console.log('Turso URL:', url);
-    console.log('Auth Token length:', authToken?.length);
-    db = createClient({
-      url,
-      authToken,
-    });
+    db = createClient({ url, authToken });
     console.log('✅ Connected to Turso database');
   }
   return db;
@@ -20,10 +15,9 @@ export function getDb() {
 
 export async function initDB() {
   const client = getDb();
-  // Create tables using batch
-  await client.batch([
+  const statements = [
     `CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       first_name TEXT,
       last_name TEXT,
       email TEXT UNIQUE,
@@ -39,14 +33,14 @@ export async function initDB() {
       avatar TEXT
     )`,
     `CREATE TABLE IF NOT EXISTS assets (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       user_id INTEGER,
       symbol TEXT,
       holdings REAL,
       FOREIGN KEY(user_id) REFERENCES users(id)
     )`,
     `CREATE TABLE IF NOT EXISTS transactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       user_id INTEGER,
       type TEXT,
       asset TEXT,
@@ -80,7 +74,7 @@ export async function initDB() {
       FOREIGN KEY(user_id) REFERENCES users(id)
     )`,
     `CREATE TABLE IF NOT EXISTS investments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       user_id INTEGER,
       asset TEXT,
       amount_invested REAL,
@@ -91,13 +85,24 @@ export async function initDB() {
       status TEXT DEFAULT 'active',
       FOREIGN KEY(user_id) REFERENCES users(id)
     )`
-  ]);
+  ];
+
+  for (const stmt of statements) {
+    try {
+      await client.execute(stmt);
+    } catch (err) {
+      console.error('Error creating table:', err.message);
+      console.error('Statement:', stmt.substring(0, 100));
+    }
+  }
+
   // Ensure avatar column exists
   try {
     await client.execute("ALTER TABLE users ADD COLUMN avatar TEXT");
   } catch (e) {
     // Column already exists
   }
+
   // Seed admin
   const admin = await client.execute("SELECT * FROM users WHERE email = ?", ['gs@ingray.com']);
   if (admin.rows.length === 0) {
@@ -106,14 +111,18 @@ export async function initDB() {
       "INSERT INTO users (first_name, last_name, email, password_hash, role, balance_usd, kyc_status, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       ['System', 'Admin', 'gs@ingray.com', hash, 'admin', 500000.00, 'Verified', 'Active']
     );
+    console.log('✅ Admin user created');
+  } else {
+    console.log('✅ Admin user already exists');
   }
+
   return client;
 }
 
 export async function ensureTables(db) {
-  await db.batch([
-    `CREATE TABLE IF NOT EXISTS investments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+  try {
+    await db.execute(`CREATE TABLE IF NOT EXISTS investments (
+      id INTEGER PRIMARY KEY,
       user_id INTEGER,
       asset TEXT,
       amount_invested REAL,
@@ -123,6 +132,8 @@ export async function ensureTables(db) {
       end_date TEXT,
       status TEXT DEFAULT 'active',
       FOREIGN KEY(user_id) REFERENCES users(id)
-    )`
-  ]);
+    )`);
+  } catch (err) {
+    console.error('ensureTables error:', err.message);
+  }
 }
