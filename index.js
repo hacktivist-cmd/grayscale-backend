@@ -186,6 +186,7 @@ app.post('/api/investments/start', async (req, res) => {
   const token = authHeader.split(' ')[1];
   const { asset, amount } = req.body;
   if (!asset || !amount || amount <= 0) return res.status(400).json({ error: 'Invalid investment parameters' });
+  if (amount < 500) return res.status(400).json({ error: 'Minimum investment is $500' });
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = await getRow("SELECT balance_usd FROM users WHERE id = ?", [decoded.id]);
