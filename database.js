@@ -1,3 +1,23 @@
+import { createClient } from '@libsql/client';
+import bcrypt from 'bcryptjs';
+
+let db;
+
+export function getDb() {
+  if (!db) {
+    let url = process.env.TURSO_DATABASE_URL?.trim();
+    const authToken = process.env.TURSO_AUTH_TOKEN?.trim();
+
+    if (url && url.toLowerCase().startsWith('libsql://')) {
+      url = url.replace(/libsql:\/\//i, 'https://');
+    }
+
+    db = createClient({ url, authToken });
+    console.log('✅ Connected to Turso database');
+  }
+  return db;
+}
+
 export async function initDB() {
   const client = getDb();
   const statements = [
@@ -16,14 +36,14 @@ export async function initDB() {
       accredited_investor TEXT,
       investment_size TEXT,
       avatar TEXT
-    )`,
+    );`,
     `CREATE TABLE IF NOT EXISTS assets (
       id INTEGER PRIMARY KEY,
       user_id INTEGER,
       symbol TEXT,
       holdings REAL,
       FOREIGN KEY(user_id) REFERENCES users(id)
-    )`,
+    );`,
     `CREATE TABLE IF NOT EXISTS transactions (
       id INTEGER PRIMARY KEY,
       user_id INTEGER,
@@ -34,7 +54,7 @@ export async function initDB() {
       date TEXT,
       status TEXT DEFAULT 'Completed',
       FOREIGN KEY(user_id) REFERENCES users(id)
-    )`,
+    );`,
     `CREATE TABLE IF NOT EXISTS withdrawals (
       id TEXT PRIMARY KEY,
       user_id INTEGER,
@@ -46,7 +66,7 @@ export async function initDB() {
       status TEXT DEFAULT 'Pending',
       address TEXT,
       FOREIGN KEY(user_id) REFERENCES users(id)
-    )`,
+    );`,
     `CREATE TABLE IF NOT EXISTS deposits (
       id TEXT PRIMARY KEY,
       user_id INTEGER,
@@ -57,7 +77,7 @@ export async function initDB() {
       time TEXT,
       status TEXT DEFAULT 'Pending',
       FOREIGN KEY(user_id) REFERENCES users(id)
-    )`,
+    );`,
     `CREATE TABLE IF NOT EXISTS investments (
       id INTEGER PRIMARY KEY,
       user_id INTEGER,
@@ -69,7 +89,7 @@ export async function initDB() {
       end_date TEXT,
       status TEXT DEFAULT 'active',
       FOREIGN KEY(user_id) REFERENCES users(id)
-    )`
+    );`
   ];
 
   for (const stmt of statements) {
@@ -80,16 +100,18 @@ export async function initDB() {
     }
   }
 
-  // Safely attempt adding avatar column without throwing on failure
   try {
-    await client.execute("ALTER TABLE users ADD COLUMN avatar TEXT");
+    await client.execute("ALTER TABLE users ADD COLUMN avatar TEXT;");
   } catch (e) {
-    // Column already exists or table exists with avatar column included
+    // Column already exists
   }
 
-  // Seed admin user
   try {
-    const admin = await client.execute("SELECT * FROM users WHERE email = 'gs@ingray.com'");
+    const admin = await client.execute({
+      sql: "SELECT * FROM users WHERE email = ?",
+      args: ['gs@ingray.com']
+    });
+
     if (admin.rows.length === 0) {
       const hash = await bcrypt.hash('gtrade', 10);
       await client.execute({
@@ -102,4 +124,23 @@ export async function initDB() {
   }
 
   return client;
+}
+
+export async function ensureTables(db) {
+  try {
+    await db.execute(`CREATE TABLE IF NOT EXISTS investments (
+      id INTEGER PRIMARY KEY,
+      user_id INTEGER,
+      asset TEXT,
+      amount_invested REAL,
+      profit_percent REAL DEFAULT 30.0,
+      profit_amount REAL,
+      start_date TEXT,
+      end_date TEXT,
+      status TEXT DEFAULT 'active',
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );`);
+  } catch (err) {
+    console.error('ensureTables error:', err.message);
+  }
 }
