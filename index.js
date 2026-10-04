@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { initDB, ensureTables, getDb } from './database.js';
+import { initDB, getDb } from './database.js';
 
 dotenv.config();
 const app = express();
@@ -20,7 +20,6 @@ let db;
 
 initDB().then(async (client) => {
   db = client;
-  await ensureTables(db);
   console.log('✅ Database initialized');
   
   app.listen(PORT, () => {
