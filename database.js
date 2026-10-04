@@ -125,22 +125,3 @@ export async function initDB() {
 
   return client;
 }
-
-export async function ensureTables(db) {
-  try {
-    await db.execute(`CREATE TABLE IF NOT EXISTS investments (
-      id INTEGER PRIMARY KEY,
-      user_id INTEGER,
-      asset TEXT,
-      amount_invested REAL,
-      profit_percent REAL DEFAULT 30.0,
-      profit_amount REAL,
-      start_date TEXT,
-      end_date TEXT,
-      status TEXT DEFAULT 'active',
-      FOREIGN KEY(user_id) REFERENCES users(id)
-    );`);
-  } catch (err) {
-    console.error('ensureTables error:', err.message);
-  }
-}
