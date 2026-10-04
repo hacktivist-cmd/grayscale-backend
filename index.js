@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { initDB, getDb } from './database.js';
+import { initDB } from './database.js';
 
 dotenv.config();
 const app = express();
@@ -17,11 +17,31 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 let db;
+let dbReady = false;
 
-initDB().then(async (client) => {
+// ---- Helpers for @libsql/client (MUST use { sql, args }) ----
+const getRow = async (sql, params = []) => {
+  const result = await db.execute({ sql, args: params });
+  return result.rows[0];
+};
+const allRows = async (sql, params = []) => {
+  const result = await db.execute({ sql, args: params });
+  return result.rows;
+};
+const run = async (sql, params = []) => {
+  return await db.execute({ sql, args: params });
+};
+
+// Wait-for-DB middleware so no request races init
+app.use((req, res, next) => {
+  if (!dbReady) return res.status(503).json({ error: 'Database initializing, try again in a moment' });
+  next();
+});
+
+initDB().then((client) => {
   db = client;
+  dbReady = true;
   console.log('✅ Database initialized');
-  
   app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
   });
@@ -29,21 +49,6 @@ initDB().then(async (client) => {
   console.error('Database init error:', err);
   process.exit(1);
 });
-
-// Helper functions for Turso
-const getRow = async (sql, params) => {
-  const result = await db.execute(sql, params);
-  return result.rows[0];
-};
-
-const allRows = async (sql, params) => {
-  const result = await db.execute(sql, params);
-  return result.rows;
-};
-
-const run = async (sql, params) => {
-  return await db.execute(sql, params);
-};
 
 function verifyAdminToken(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -63,20 +68,25 @@ function verifyAdminToken(req, res, next) {
 app.post('/api/auth/signup', async (req, res) => {
   const { firstName, lastName, email, password, phone, country, accreditedInvestor, investmentSize } = req.body;
   try {
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
     const existingUser = await getRow("SELECT id FROM users WHERE email = ?", [email]);
     if (existingUser) return res.status(400).json({ error: 'Email already registered' });
-    
+
     const hash = await bcrypt.hash(password, 10);
     await run(
       `INSERT INTO users (first_name, last_name, email, password_hash, role, balance_usd, kyc_status, status, phone, country, accredited_investor, investment_size)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [firstName, lastName, email, hash, 'user', 0.00, 'Pending', 'Active', phone || null, country || null, accreditedInvestor || null, investmentSize || null]
+      [firstName || null, lastName || null, email, hash, 'user', 0.00, 'Pending', 'Active',
+       phone || null, country || null, accreditedInvestor || null, investmentSize || null]
     );
 
-    // Fetch the newly inserted user directly by email
-    const user = await getRow("SELECT id, email, role, first_name, last_name, avatar FROM users WHERE email = ?", [email]);
-    
-    // Create default assets for the user
+    const user = await getRow(
+      "SELECT id, email, role, first_name AS firstName, last_name AS lastName, avatar FROM users WHERE email = ?",
+      [email]
+    );
+
+    // Create default assets
     const assets = ['BTC', 'ETH', 'SOL', 'USDT'];
     for (const symbol of assets) {
       await run("INSERT INTO assets (user_id, symbol, holdings) VALUES (?, ?, ?)", [user.id, symbol, 0.00]);
@@ -93,15 +103,32 @@ app.post('/api/auth/signup', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
-    const user = await getRow("SELECT id, email, password_hash, role, first_name, last_name, avatar FROM users WHERE email = ?", [email]);
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
+    const user = await getRow(
+      "SELECT id, email, password_hash, role, first_name, last_name, avatar FROM users WHERE email = ?",
+      [email]
+    );
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+
     const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user.id, email: user.email, role: user.role, firstName: user.first_name, lastName: user.last_name, avatar: user.avatar } });
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        avatar: user.avatar
+      }
+    });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Login failed' });
+    console.error('Login Error:', error);
+    res.status(500).json({ error: 'Login failed', details: error.message });
   }
 });
 
@@ -111,7 +138,10 @@ app.get('/api/auth/me', async (req, res) => {
   const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await getRow("SELECT id, email, role, first_name, last_name, avatar FROM users WHERE id = ?", [decoded.id]);
+    const user = await getRow(
+      "SELECT id, email, role, first_name AS firstName, last_name AS lastName, avatar FROM users WHERE id = ?",
+      [decoded.id]
+    );
     if (!user) return res.status(401).json({ error: 'User not found' });
     res.json({ user });
   } catch (error) {
@@ -132,8 +162,12 @@ app.put('/api/user/profile', async (req, res) => {
     const newFirstName = firstName ?? existing.first_name;
     const newLastName = lastName ?? existing.last_name;
     const newAvatar = avatar ?? existing.avatar;
-    await run("UPDATE users SET first_name = ?, last_name = ?, avatar = ? WHERE id = ?", [newFirstName, newLastName, newAvatar, decoded.id]);
-    const user = await getRow("SELECT id, email, role, first_name, last_name, avatar FROM users WHERE id = ?", [decoded.id]);
+    await run("UPDATE users SET first_name = ?, last_name = ?, avatar = ? WHERE id = ?",
+      [newFirstName, newLastName, newAvatar, decoded.id]);
+    const user = await getRow(
+      "SELECT id, email, role, first_name AS firstName, last_name AS lastName, avatar FROM users WHERE id = ?",
+      [decoded.id]
+    );
     res.json({ success: true, user });
   } catch (error) {
     console.error(error);
@@ -162,7 +196,7 @@ app.get('/api/transactions', async (req, res) => {
   const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    const transactions = await allRows("SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC LIMIT 10", [decoded.id]);
+    const transactions = await allRows("SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 10", [decoded.id]);
     res.json({ transactions });
   } catch (error) {
     res.status(401).json({ error: 'Invalid token' });
@@ -193,22 +227,30 @@ app.post('/api/investments/start', async (req, res) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = await getRow("SELECT balance_usd FROM users WHERE id = ?", [decoded.id]);
     if (!user || user.balance_usd < amount) return res.status(400).json({ error: 'Insufficient balance' });
+
     await run("UPDATE users SET balance_usd = balance_usd - ? WHERE id = ?", [amount, decoded.id]);
+
     const profitAmount = amount * 0.30;
     const startDate = new Date().toISOString();
-    const endDate = new Date(Date.now() + 7*24*60*60*1000).toISOString();
+    const endDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
     const result = await run(
-      `INSERT INTO investments (user_id, asset, amount_invested, profit_amount, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO investments (user_id, asset, amount_invested, profit_amount, start_date, end_date, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [decoded.id, asset, amount, profitAmount, startDate, endDate, 'active']
     );
+
     await run(
       `INSERT INTO transactions (user_id, type, asset, amount, usd_value, date, status) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [decoded.id, 'Investment', asset, `-$${amount.toFixed(2)}`, `$${amount.toFixed(2)}`, new Date().toLocaleDateString(), 'Completed']
     );
-    res.json({ success: true, investmentId: result.lastInsertRowid, message: `Investment in ${asset} started. +30% profit in 7 days!` });
+
+    // IMPORTANT: lastInsertRowid is a BigInt — convert to Number for JSON
+    const investmentId = Number(result.lastInsertRowid);
+    res.json({ success: true, investmentId, message: `Investment in ${asset} started. +30% profit in 7 days!` });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to start investment' });
+    console.error('Investment Error:', error);
+    res.status(500).json({ error: 'Failed to start investment', details: error.message });
   }
 });
 
@@ -222,12 +264,14 @@ app.post('/api/investments/withdraw', async (req, res) => {
     const investment = await getRow("SELECT * FROM investments WHERE id = ? AND user_id = ?", [investmentId, decoded.id]);
     if (!investment) return res.status(404).json({ error: 'Investment not found' });
     if (investment.status !== 'active') return res.status(400).json({ error: 'Investment already completed or withdrawn' });
+
     const now = new Date();
     const endDate = new Date(investment.end_date);
     if (now < endDate) {
-      const daysLeft = Math.ceil((endDate - now) / (1000*60*60*24));
+      const daysLeft = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
       return res.status(400).json({ error: `Investment is locked for ${daysLeft} more day(s)` });
     }
+
     const totalPayout = investment.amount_invested + investment.profit_amount;
     await run("UPDATE users SET balance_usd = balance_usd + ? WHERE id = ?", [totalPayout, decoded.id]);
     await run("UPDATE investments SET status = 'completed' WHERE id = ?", [investmentId]);
@@ -251,6 +295,7 @@ app.post('/api/trade', async (req, res) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     const { payAsset, getAsset, payAmount, receiveQty } = req.body;
     if (!payAsset || !getAsset || !payAmount || !receiveQty) return res.status(400).json({ error: 'Invalid trade parameters' });
+
     await run("UPDATE assets SET holdings = holdings - ? WHERE user_id = ? AND symbol = ?", [payAmount, decoded.id, payAsset]);
     await run("UPDATE assets SET holdings = holdings + ? WHERE user_id = ? AND symbol = ?", [receiveQty, decoded.id, getAsset]);
     await run(
@@ -264,10 +309,12 @@ app.post('/api/trade', async (req, res) => {
   }
 });
 
-// --- ADMIN ROUTES (using verifyAdminToken) ---
+// --- ADMIN ROUTES ---
 app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
   try {
-    const users = await allRows("SELECT id, first_name, last_name, email, balance_usd, kyc_status, status, phone, country, accredited_investor, investment_size, avatar FROM users");
+    const users = await allRows(
+      "SELECT id, first_name, last_name, email, balance_usd, kyc_status, status, phone, country, accredited_investor, investment_size, avatar FROM users"
+    );
     const usersWithAssets = await Promise.all(users.map(async (u) => {
       const assets = await allRows("SELECT symbol, holdings FROM assets WHERE user_id = ?", [u.id]);
       return { ...u, assets };
@@ -345,7 +392,7 @@ app.put('/api/admin/withdrawals/:id', verifyAdminToken, async (req, res) => {
     if (status === 'Rejected') {
       const withdrawal = await getRow("SELECT user_id, amount FROM withdrawals WHERE id = ?", [id]);
       if (withdrawal) {
-        const amount = parseFloat(withdrawal.amount.replace(/[^0-9.-]/g, '')) || 0;
+        const amount = parseFloat(String(withdrawal.amount).replace(/[^0-9.-]/g, '')) || 0;
         await run("UPDATE users SET balance_usd = balance_usd + ? WHERE id = ?", [amount, withdrawal.user_id]);
       }
     }
@@ -385,7 +432,7 @@ app.put('/api/admin/deposits/:id', verifyAdminToken, async (req, res) => {
 
 app.get('/api/admin/transactions', verifyAdminToken, async (req, res) => {
   try {
-    const transactions = await allRows("SELECT * FROM transactions ORDER BY date DESC");
+    const transactions = await allRows("SELECT * FROM transactions ORDER BY id DESC");
     res.json({ transactions });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch transactions' });
@@ -412,11 +459,14 @@ app.post('/api/deposits', async (req, res) => {
     const { amount, asset } = req.body;
     if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
     const id = 'DEP-' + Date.now();
-    const userName = `${user.first_name} ${user.last_name}`.trim() || 'User';
-    await run("INSERT INTO deposits (id, user_id, user_name, amount, asset, date, time, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, decoded.id, userName, amount, asset, new Date().toLocaleDateString(), new Date().toLocaleTimeString(), 'Pending']);
+    const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'User';
+    await run(
+      "INSERT INTO deposits (id, user_id, user_name, amount, asset, date, time, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, decoded.id, userName, amount, asset, new Date().toLocaleDateString(), new Date().toLocaleTimeString(), 'Pending']
+    );
     res.json({ success: true, depositId: id, message: 'Deposit request submitted.' });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: 'Failed to submit deposit request' });
   }
 });
@@ -431,13 +481,17 @@ app.post('/api/withdrawals', async (req, res) => {
     const { amount, asset, address } = req.body;
     if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
     if (amount > user.balance_usd) return res.status(400).json({ error: 'Insufficient balance' });
+
     await run("UPDATE users SET balance_usd = balance_usd - ? WHERE id = ?", [amount, decoded.id]);
     const id = 'WTH-' + Date.now();
-    const userName = `${user.first_name} ${user.last_name}`.trim() || 'User';
-    await run("INSERT INTO withdrawals (id, user_id, user_name, amount, asset, date, time, status, address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, decoded.id, userName, amount, asset, new Date().toLocaleDateString(), new Date().toLocaleTimeString(), 'Pending', address || null]);
+    const userName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'User';
+    await run(
+      "INSERT INTO withdrawals (id, user_id, user_name, amount, asset, date, time, status, address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [id, decoded.id, userName, amount, asset, new Date().toLocaleDateString(), new Date().toLocaleTimeString(), 'Pending', address || null]
+    );
     res.json({ success: true, withdrawalId: id, message: 'Withdrawal request submitted.' });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: 'Failed to submit withdrawal request' });
   }
 });

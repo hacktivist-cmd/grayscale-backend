@@ -8,12 +8,18 @@ export function getDb() {
     let url = process.env.TURSO_DATABASE_URL?.trim();
     const authToken = process.env.TURSO_AUTH_TOKEN?.trim();
 
-    if (url && url.toLowerCase().startsWith('libsql://')) {
+    if (!url) {
+      // local fallback so it doesn't crash during dev
+      url = 'file:grayscale.db';
+      console.warn('⚠️  TURSO_DATABASE_URL not set, falling back to local file DB');
+    }
+
+    if (url.toLowerCase().startsWith('libsql://')) {
       url = url.replace(/libsql:\/\//i, 'https://');
     }
 
     db = createClient({ url, authToken });
-    console.log('✅ Connected to Turso database');
+    console.log('✅ Connected to DB:', url);
   }
   return db;
 }
@@ -100,15 +106,15 @@ export async function initDB() {
     }
   }
 
+  // Add avatar column if it doesn't exist (safe migration for existing DBs)
   try {
     await client.execute("ALTER TABLE users ADD COLUMN avatar TEXT;");
-  } catch (e) {
-    // Column already exists
-  }
+  } catch (e) { /* already exists */ }
 
+  // Seed admin
   try {
     const admin = await client.execute({
-      sql: "SELECT * FROM users WHERE email = ?",
+      sql: "SELECT id FROM users WHERE email = ?",
       args: ['gs@ingray.com']
     });
 
@@ -118,6 +124,7 @@ export async function initDB() {
         sql: "INSERT INTO users (first_name, last_name, email, password_hash, role, balance_usd, kyc_status, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         args: ['System', 'Admin', 'gs@ingray.com', hash, 'admin', 500000.00, 'Verified', 'Active']
       });
+      console.log('✅ Admin user seeded: gs@ingray.com / gtrade');
     }
   } catch (e) {
     console.error('Admin seed error:', e.message);
