@@ -67,23 +67,26 @@ app.post('/api/auth/signup', async (req, res) => {
     if (existingUser) return res.status(400).json({ error: 'Email already registered' });
     
     const hash = await bcrypt.hash(password, 10);
-    const result = await run(
+    await run(
       `INSERT INTO users (first_name, last_name, email, password_hash, role, balance_usd, kyc_status, status, phone, country, accredited_investor, investment_size)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [firstName, lastName, email, hash, 'user', 0.00, 'Pending', 'Active', phone || null, country || null, accreditedInvestor || null, investmentSize || null]
     );
-    const userId = result.lastInsertRowid;
-    // Create default assets
+
+    // Fetch the newly inserted user directly by email
+    const user = await getRow("SELECT id, email, role, first_name, last_name, avatar FROM users WHERE email = ?", [email]);
+    
+    // Create default assets for the user
     const assets = ['BTC', 'ETH', 'SOL', 'USDT'];
     for (const symbol of assets) {
-      await run("INSERT INTO assets (user_id, symbol, holdings) VALUES (?, ?, ?)", [userId, symbol, 0.00]);
+      await run("INSERT INTO assets (user_id, symbol, holdings) VALUES (?, ?, ?)", [user.id, symbol, 0.00]);
     }
-    const user = await getRow("SELECT id, email, role, first_name, last_name, avatar FROM users WHERE id = ?", [userId]);
+
     const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Signup failed' });
+    console.error('Signup Error:', error);
+    res.status(500).json({ error: 'Signup failed', details: error.message });
   }
 });
 
